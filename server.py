@@ -6,6 +6,8 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -273,6 +275,45 @@ def _octoprint_get(path):
         return json.loads(resp.read())
 
 
+def _octoprint_post(path, payload):
+    api_key = _octoprint_api_key()
+    if not api_key:
+        raise RuntimeError("octoprint api key not found")
+    req = urllib.request.Request(
+        OCTOPRINT_BASE + path,
+        data=json.dumps(payload).encode(),
+        headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status
+
+
+def restart_last_print():
+    """Re-select and start the most recently printed file. Gated on the
+    printer being idle/connected right now -- OctoPrint doesn't record *why*
+    a print failed (just success: false), so this can't tell a USB-unplug
+    failure apart from a jam or thermal issue. It only guards against firing
+    into a printer that's mid-print or disconnected."""
+    conn = get_printer_connection()
+    if conn.get("state") != "Operational":
+        return {"ok": False, "error": f"printer not ready (state={conn.get('state')!r}, must be 'Operational')"}
+    last = get_last_print_outcome()
+    if not last:
+        return {"ok": False, "error": "no print history found"}
+    filename = last["file"]
+    try:
+        _octoprint_post(
+            "/api/files/local/" + urllib.parse.quote(filename),
+            {"command": "select", "print": True},
+        )
+        return {"ok": True, "file": filename}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"octoprint http {e.code}: {e.read().decode()[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def get_printer_connection():
     """Connection state of OctoPrint's serial link to the 3D printer.
     OctoPrint's API doesn't track raw RX/TX byte counts, only link state/port/baud."""
@@ -440,6 +481,14 @@ DASHBOARD_HTML = """<!doctype html>
   .psu-card { flex-direction: row; align-items: stretch; gap: 1.5rem; }
   .psu-left { flex: 0 0 auto; min-width: 12rem; }
   .psu-right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .restart-btn {
+    margin-top: .5rem; font-size: .78rem; font-weight: 600; padding: .45rem .8rem;
+    border-radius: 8px; border: 1px solid var(--pill-bad-fg); background: var(--pill-bad-bg);
+    color: var(--pill-bad-fg); cursor: pointer;
+  }
+  .restart-btn:disabled {
+    border-color: var(--card-border); background: transparent; color: var(--label); cursor: not-allowed;
+  }
 </style>
 </head>
 <body>
@@ -492,6 +541,7 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="metric"><span class="label" id="job-file">&mdash;</span><span class="value" id="job-time-left">&mdash;</span></div>
   <div class="bar"><div class="bar-fill" id="job-progress-bar"></div></div>
   <div class="flags-label">Last print: <span id="last-print">&mdash;</span></div>
+  <button id="restart-btn" class="restart-btn" disabled>Restart Last Print</button>
 </div>
 
 <div class="card">
@@ -514,10 +564,14 @@ DASHBOARD_HTML = """<!doctype html>
 
 <div class="updated" id="updated">loading&hellip;</div>
 <script>
+let lastData = null;
+let restartInFlight = false;
+
 async function refresh() {
   try {
     const r = await fetch('/status');
     const d = await r.json();
+    lastData = d;
 
     document.getElementById('ssid').textContent = d.ssid || 'unknown';
     document.getElementById('lan-ip').textContent = d.lan_ip || '—';
@@ -526,7 +580,10 @@ async function refresh() {
     rssiEl.textContent = d.rssi_dbm + ' dBm';
     rssiEl.className = 'value ' + (d.rssi_dbm >= -60 ? 'ok' : d.rssi_dbm >= -70 ? 'warn' : 'bad');
 
-    document.getElementById('quality').textContent = (d.link_quality_pct != null ? d.link_quality_pct + '%' : '—');
+    const qualityEl = document.getElementById('quality');
+    const q = d.link_quality_pct;
+    qualityEl.textContent = (q != null ? q + '%' : '—');
+    qualityEl.className = 'value ' + (q == null ? '' : q >= 70 ? 'ok' : q >= 40 ? 'warn' : 'bad');
     document.getElementById('voltage').textContent = d.voltage + ' V';
 
     const tempEl = document.getElementById('temp');
@@ -605,6 +662,16 @@ async function refresh() {
       lpEl.style.color = 'var(--label)';
     }
 
+    const restartBtn = document.getElementById('restart-btn');
+    if (!restartInFlight) {
+      const canRestart = lp && !lp.error && lp.success === false && pc.state === 'Operational';
+      restartBtn.disabled = !canRestart;
+      restartBtn.textContent = 'Restart Last Print';
+      restartBtn.title = canRestart
+        ? 'Reprint "' + lp.file + '"'
+        : 'Only enabled when the last print failed and the printer is idle/connected';
+    }
+
     const uploadsEl = document.getElementById('uploads-list');
     uploadsEl.innerHTML = '';
     const uploads = d.uploads || [];
@@ -646,6 +713,32 @@ async function refresh() {
     document.getElementById('updated').textContent = 'fetch failed: ' + e;
   }
 }
+document.getElementById('restart-btn').addEventListener('click', async () => {
+  if (!lastData || !lastData.last_print) return;
+  const lp = lastData.last_print;
+  if (!confirm('Restart print of "' + lp.file + '"?\\n\\nThis will immediately start heating and extruding on the printer.')) return;
+
+  restartInFlight = true;
+  const btn = document.getElementById('restart-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const res = await fetch('/restart-print', { method: 'POST' });
+    const result = await res.json();
+    if (result.ok) {
+      btn.textContent = 'Started ✓';
+    } else {
+      alert('Failed to restart: ' + result.error);
+      btn.textContent = 'Restart Last Print';
+    }
+  } catch (e) {
+    alert('Request failed: ' + e);
+    btn.textContent = 'Restart Last Print';
+  }
+  restartInFlight = false;
+  refresh();
+});
+
 refresh();
 setInterval(refresh, 4000);
 </script>
@@ -702,6 +795,19 @@ class Handler(BaseHTTPRequestHandler):
             }
         ).encode()
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path != "/restart-print":
+            self.send_response(404)
+            self.end_headers()
+            return
+        result = restart_last_print()
+        body = json.dumps(result).encode()
+        self.send_response(200 if result.get("ok") else 409)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
