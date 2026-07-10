@@ -567,6 +567,12 @@ DASHBOARD_HTML = """<!doctype html>
 let lastData = null;
 let restartInFlight = false;
 
+function classifyPrinterTemp(actual, target) {
+  if (actual == null) return '';
+  if (target && target > 0) return Math.abs(actual - target) <= 3 ? 'ok' : 'warn';
+  return actual >= 50 ? 'warn' : 'ok';
+}
+
 async function refresh() {
   try {
     const r = await fetch('/status');
@@ -644,12 +650,18 @@ async function refresh() {
     document.getElementById('job-progress-bar').style.width = (job.completion_pct || 0) + '%';
 
     const temps = d.printer_temps || {};
+    const nozzleEl = document.getElementById('nozzle-temp');
+    const bedEl = document.getElementById('bed-temp');
     if (temps.connected) {
-      document.getElementById('nozzle-temp').textContent = temps.nozzle_actual + '/' + temps.nozzle_target + ' °C';
-      document.getElementById('bed-temp').textContent = temps.bed_actual + '/' + temps.bed_target + ' °C';
+      nozzleEl.textContent = temps.nozzle_actual + '/' + temps.nozzle_target + ' °C';
+      nozzleEl.className = 'value ' + classifyPrinterTemp(temps.nozzle_actual, temps.nozzle_target);
+      bedEl.textContent = temps.bed_actual + '/' + temps.bed_target + ' °C';
+      bedEl.className = 'value ' + classifyPrinterTemp(temps.bed_actual, temps.bed_target);
     } else {
-      document.getElementById('nozzle-temp').textContent = 'n/a';
-      document.getElementById('bed-temp').textContent = 'n/a';
+      nozzleEl.textContent = 'n/a';
+      nozzleEl.className = 'value';
+      bedEl.textContent = 'n/a';
+      bedEl.className = 'value';
     }
 
     const lp = d.last_print;
