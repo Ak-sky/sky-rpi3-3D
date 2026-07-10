@@ -645,7 +645,7 @@ async function refresh() {
 
     const job = d.printer_job || {};
     document.getElementById('job-state').textContent = job.state || job.error || 'unknown';
-    document.getElementById('job-file').textContent = job.file || 'no file loaded';
+    document.getElementById('job-file').textContent = job.file || 'No file loaded';
     document.getElementById('job-time-left').textContent = job.time_left ? (job.time_left + ' left') : '—';
     document.getElementById('job-progress-bar').style.width = (job.completion_pct || 0) + '%';
 
