@@ -1,0 +1,13 @@
+[Unit]
+Description=Pi status JSON endpoint (RSSI, voltage, throttle state)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/status-server/server.py
+Restart=always
+RestartSec=2
+User=pi
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
